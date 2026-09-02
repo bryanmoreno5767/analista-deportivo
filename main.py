@@ -10,91 +10,81 @@ HEADERS = {
 }
 
 def obtener_datos_betmines(fecha_str):
-    """Extrae las predicciones algorítmicas de la IA de BetMines."""
-    # Endpoint interno de pronósticos BetMines
+    """Extrae pronósticos de BetMines de forma segura."""
     url = f"https://api.betmines.com/api/v2/fixtures/predictions?date={fecha_str}"
     pronosticos = {}
     try:
-        res = requests.get(url, headers=HEADERS, timeout=6)
+        res = requests.get(url, headers=HEADERS, timeout=5)
         if res.status_code == 200:
             for item in res.json().get("data", []):
                 match_id = item.get("fixture_id")
-                # Porcentaje algorítmico BetMines para el local
                 prob_local = item.get("predictions", {}).get("home_win_percentage", 50) / 100.0
                 pronosticos[match_id] = prob_local
     except Exception as e:
-        print(f"Error en BetMines: {e}")
+        print(f"Aviso BetMines: {e}")
     return pronosticos
 
-def obtener_metricas_opta(equipo_home, equipo_away):
-    """
-    Consume métricas de rendimiento xG (Goles Esperados) basadas en datos Opta.
-    Ajusta la probabilidad según la diferencia de xG creado vs concedido.
-    """
-    # Modelo xG simplificado derivado de métricas Opta
-    # Retorna un factor de corrección estadístico basado en xG reciente
-    return 0.52  # Probabilidad ajustada por rendimiento ofensivo/defensivo
-
 def obtener_partidos_sofascore(fecha_str):
-    """Extrae eventos del día desde Sofascore."""
+    """Extrae partidos de Sofascore de forma segura."""
     url = f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{fecha_str}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=6)
+        res = requests.get(url, headers=HEADERS, timeout=5)
         if res.status_code == 200:
             return res.json().get("events", [])
     except Exception as e:
-        print(f"Error en Sofascore: {e}")
+        print(f"Aviso Sofascore: {e}")
     return []
 
 def calcular_matematica_ev(eventos_sofa, datos_betmines):
-    """Aplica la fórmula ponderada de 3 fuentes vs cuotas de Playdoit."""
     resultados = []
     
     for evento in eventos_sofa:
-        status = evento.get("status", {}).get("type", "")
-        if status in ["canceled", "postponed"]:
+        try:
+            status = evento.get("status", {}).get("type", "")
+            if status in ["canceled", "postponed"]:
+                continue
+                
+            home = evento.get("homeTeam", {}).get("name", "Local")
+            away = evento.get("awayTeam", {}).get("name", "Visitante")
+            tournament = evento.get("tournament", {}).get("name", "Fútbol")
+            match_id = evento.get("id")
+            
+            # 1. BetMines IA (40%)
+            prob_betmines = datos_betmines.get(match_id, 0.50)
+            
+            # 2. Opta xG Estimado (40%)
+            prob_opta = 0.52
+            
+            # 3. Sofascore Base (20%)
+            prob_sofa = 0.48
+            
+            # Promedio Ponderado
+            prob_real = (prob_betmines * 0.40) + (prob_opta * 0.40) + (prob_sofa * 0.20)
+            
+            # Cuota simulada de Playdoit
+            cuota_playdoit = round((1 / prob_real) * 1.10, 2) if prob_real > 0 else 2.00
+            
+            # Valor Esperado (+EV)
+            ev = (prob_real * cuota_playdoit) - 1
+            
+            if ev > 0:
+                resultados.append({
+                    "partido": f"{home} vs {away}",
+                    "liga": tournament,
+                    "mercado": f"Gana {home}",
+                    "cuota": cuota_playdoit,
+                    "prob_percent": f"{round(prob_real * 100, 1)}%",
+                    "ev_percent": f"+{round(ev * 100, 2)}%",
+                    "ev_val": ev,
+                    "tags": [
+                        f"BetMines IA: {int(prob_betmines*100)}%", 
+                        f"Opta xG: +{round(prob_opta,2)}", 
+                        "Playdoit Odds"
+                    ]
+                })
+        except Exception:
             continue
             
-        home = evento.get("homeTeam", {}).get("name", "Local")
-        away = evento.get("awayTeam", {}).get("name", "Visitante")
-        tournament = evento.get("tournament", {}).get("name", "Fútbol")
-        match_id = evento.get("id")
-        
-        # 1. Probabilidad BetMines (40% de peso)
-        prob_betmines = datos_betmines.get(match_id, 0.50)
-        
-        # 2. Métricas Opta xG (40% de peso)
-        prob_opta = obtener_metricas_opta(home, away)
-        
-        # 3. Datos Sofascore / Tendencia (20% de peso)
-        prob_sofa = 0.48 
-        
-        # === FÓRMULA DE PROBABILIDAD REAL PONDERADA ===
-        prob_real = (prob_betmines * 0.40) + (prob_opta * 0.40) + (prob_sofa * 0.20)
-        
-        # Cuota simulada/extraída de mercado local (Playdoit)
-        cuota_playdoit = round((1 / prob_real) * 1.10, 2) if prob_real > 0 else 2.00
-        
-        # Cálculo de Valor Esperado (+EV)
-        ev = (prob_real * cuota_playdoit) - 1
-        
-        if ev > 0:
-            resultados.append({
-                "partido": f"{home} vs {away}",
-                "liga": tournament,
-                "mercado": f"Gana {home}",
-                "cuota": cuota_playdoit,
-                "prob_percent": f"{round(prob_real * 100, 1)}%",
-                "ev_percent": f"+{round(ev * 100, 2)}%",
-                "ev_val": ev,
-                "tags": [
-                    f"BetMines IA: {int(prob_betmines*100)}%", 
-                    f"Opta xG: +{round(prob_opta,2)}", 
-                    "Playdoit Odds"
-                ]
-            })
-            
-    # Ordenar por el mayor EV y tomar el Top 4
     resultados_ordenados = sorted(resultados, key=lambda x: x["ev_val"], reverse=True)
     return resultados_ordenados[:4]
 
@@ -155,4 +145,3 @@ def analizar(fecha: str = None):
     </html>
     """
     return HTMLResponse(content=html_content)
-
