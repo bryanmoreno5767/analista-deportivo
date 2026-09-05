@@ -5,14 +5,22 @@ import datetime
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
 
-app = FastAPI(title="Analista Cuantitativo de Apuestas de Valor (+EV)")
+app = FastAPI(title="Filtro BetMines 60-65% +EV")
+
+# Header simulando un navegador web estándar para acceder a las respuestas públicas de BetMines
+HEADERS_BETMINES = {
+    "User-Agent": "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Referer": "https://betmines.com/"
+}
 
 # ------------------------------------------------------------------
-# CONFIGURACIÓN Y ZONA HORARIA MÉXICO (CDMX)
+# UTILIDADES DE FECHA (HORA MÉXICO CDMX)
 # ------------------------------------------------------------------
 
-def normalizar_fecha(fecha_in: str) -> str:
-    """Valida y ajusta la fecha a formato YYYY-MM-DD."""
+def obtener_fecha_valida(fecha_in: str) -> str:
+    """Asegura el formato YYYY-MM-DD para la fecha seleccionada en tu Atajo."""
     if not fecha_in:
         return datetime.datetime.now(ZoneInfo("America/Mexico_City")).strftime("%Y-%m-%d")
     fecha_in = fecha_in.strip()
@@ -22,237 +30,143 @@ def normalizar_fecha(fecha_in: str) -> str:
             return f"{partes[2]}-{partes[1]}-{partes[0]}"
     return fecha_in
 
-def convertir_a_hora_mexico(hora_utc_str: str) -> str:
-    """Convierte marcas de tiempo UTC a Hora Central de México."""
+def formatear_hora_cdmx(hora_utc_str: str) -> str:
+    """Convierte la hora del evento a la Hora Central de México."""
     try:
-        if not hora_utc_str or len(hora_utc_str) < 16:
-            return "12:00"
+        if not hora_utc_str:
+            return "--:--"
         dt_utc = datetime.datetime.fromisoformat(hora_utc_str.replace("Z", "+00:00"))
         dt_cdmx = dt_utc.astimezone(ZoneInfo("America/Mexico_City"))
         return dt_cdmx.strftime("%H:%M")
     except Exception:
-        return hora_utc_str[11:16] if len(hora_utc_str) >= 16 else "12:00"
+        return hora_utc_str[11:16] if len(hora_utc_str) >= 16 else "--:--"
 
 # ------------------------------------------------------------------
-# PIPELINE DE CONSULTA Y PROCESAMIENTO MULTIFUENTE
+# EXTRACCIÓN Y FILTRADO DE BETMINES (60% - 65%)
 # ------------------------------------------------------------------
 
-def obtener_eventos_multifuente(fecha_str: str) -> List[Dict[str, Any]]:
+def consultar_y_filtrar_betmines(fecha_str: str) -> List[Dict[str, Any]]:
     """
-    Simulación e integración del cruce de datos:
-    - Sofascore / RapidAPI: Programación y probabilidades 1X2.
-    - FotMob: Bajas, alineaciones y xG reciente.
-    - SoccerStats: Córners (por partido/equipo) y tendencias Over/Under.
-    - WhoScored / Opta: Tiros a puerta y faltas de jugadores clave.
-    - Árbitros: Promedio de tarjetas amarillas y rojas.
+    Consulta los partidos programados en BetMines para cualquier fecha (presente o futura)
+    y extrae todos los mercados cuya probabilidad esté estrictamente entre 60% y 65%.
     """
-    url_base = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
-    headers = {
-        "X-RapidAPI-Key": "D06ff3a51emshd8c4b86c977e9c2p164dd3jsn5f2fd0a88a17",
-        "X-RapidAPI-Host": "football-prediction-api.p.rapidapi.com"
-    }
-    params = {"date": fecha_str}
+    # Endpoint público de la API web de BetMines para partidos por fecha
+    url_betmines = f"https://api.betmines.com/api/v2/fixtures/date/{fecha_str}"
     
-    eventos_procesados = []
+    apuestas_filtradas = []
 
     try:
-        resp = requests.get(url_base, headers=headers, params=params, timeout=10)
-        data = resp.json().get("data", []) if resp.status_code == 200 else []
-        
-        for item in data:
-            home = item.get("home_team", "Local").strip()
-            away = item.get("away_team", "Visitante").strip()
-            liga = item.get("federation", "Liga Profesional")
-            hora_cdmx = convertir_a_hora_mexico(item.get("start_date", ""))
-            
-            preds = item.get("predictions", {})
-            p_home = float(preds.get("classic", {}).get("home", 45)) / 100
-            p_draw = float(preds.get("classic", {}).get("draw", 28)) / 100
-            p_away = float(preds.get("classic", {}).get("away", 27)) / 100
-            p_over25 = float(preds.get("over_25", 50)) / 100
+        resp = requests.get(url_betmines, headers=HEADERS_BETMINES, timeout=12)
+        if resp.status_code != 200:
+            # Respaldo si el endpoint primario cambia de estructura en fechas futuras
+            url_betmines_alt = f"https://betmines.com/api/fixtures?date={fecha_str}"
+            resp = requests.get(url_betmines_alt, headers=HEADERS_BETMINES, timeout=12)
 
-            # Métricas calculadas para simular el cruce con FotMob, SoccerStats y Opta
-            xg_home = round(1.0 + (p_home * 1.4), 2)
-            xg_away = round(0.8 + (p_away * 1.2), 2)
-            
-            corners_home = round(4.2 + (p_home * 2.2), 1)
-            corners_away = round(3.5 + (p_away * 1.8), 1)
-            corners_totales = round(corners_home + corners_away, 1)
-            
-            referee_cards = round(3.6 + (p_draw * 2.2), 2)
-            
-            # Jugadores Opta para disparos
-            jugador_1 = f"Atacante Principal ({home})"
-            j1_shots = round(1.1 + (p_home * 0.8), 2)
-            
-            jugador_2 = f"Referente Ofensivo ({away})"
-            j2_shots = round(0.9 + (p_away * 0.8), 2)
+        data = resp.json() if resp.status_code == 200 else []
+        fixtures = data if isinstance(data, list) else data.get("response", data.get("data", []))
 
-            eventos_procesados.append({
-                "partido": f"{home} vs {away}",
-                "home": home,
-                "away": away,
-                "liga": liga,
-                "hora": hora_cdmx,
-                "prob_1x2": {"1": p_home, "X": p_draw, "2": p_away},
-                "fotmob": {"xg_home": xg_home, "xg_away": xg_away, "bajas": "Plantillas confirmadas"},
-                "soccerstats": {"corners_totales": corners_totales, "corners_home": corners_home, "corners_away": corners_away, "over25": p_over25},
-                "referee": {"prom_tarjetas": referee_cards},
-                "opta_players": [
-                    {"nombre": jugador_1, "prom_tiros_puerta": j1_shots},
-                    {"nombre": jugador_2, "prom_tiros_puerta": j2_shots}
-                ]
-            })
+        for fix in fixtures:
+            home = fix.get("homeTeam", {}).get("name") or fix.get("home_team", "Local")
+            away = fix.get("awayTeam", {}).get("name") or fix.get("away_team", "Visitante")
+            liga = fix.get("league", {}).get("name") or fix.get("competition", "Liga Profesional")
+            hora_raw = fix.get("matchDate") or fix.get("date", "")
+            hora_cdmx = formatear_hora_cdmx(str(hora_raw))
+
+            # Extraer probabilidades de los distintos mercados de BetMines
+            probs = fix.get("predictions", fix.get("probabilities", {}))
+            
+            # Evaluación de Mercados
+            mercados_evaluar = [
+                {"mercado": "1X2 - Local", "pick": f"Victoria {home}", "prob": float(probs.get("1", probs.get("home", 0)))},
+                {"mercado": "1X2 - Empate", "pick": "Empate (X)", "prob": float(probs.get("X", probs.get("draw", 0)))},
+                {"mercado": "1X2 - Visitante", "pick": f"Victoria {away}", "prob": float(probs.get("2", probs.get("away", 0)))},
+                {"mercado": "Doble Oportunidad", "pick": "1X (Local o Empate)", "prob": float(probs.get("1X", 0))},
+                {"mercado": "Doble Oportunidad", "pick": "X2 (Empate o Visitante)", "prob": float(probs.get("X2", 0))},
+                {"mercado": "Goles", "pick": "Over 1.5 Goles", "prob": float(probs.get("over15", probs.get("over_15", 0)))},
+                {"mercado": "Goles", "pick": "Over 2.5 Goles", "prob": float(probs.get("over25", probs.get("over_25", 0)))},
+                {"mercado": "Goles", "pick": "Under 2.5 Goles", "prob": float(probs.get("under25", probs.get("under_25", 0)))},
+                {"mercado": "Ambos Anotan", "pick": "BTTS - Sí", "prob": float(probs.get("btts_yes", probs.get("btts", 0)))},
+                {"mercado": "Córners", "pick": "Over 8.5 Córners", "prob": float(probs.get("corners_over85", 0))},
+                {"mercado": "Córners", "pick": "Over 9.5 Córners", "prob": float(probs.get("corners_over95", 0))},
+            ]
+
+            for m in mercados_evaluar:
+                prob = m["prob"]
+                # Normalizar probabilidad si viene en rango 0-1 en lugar de 0-100
+                if 0 < prob <= 1.0:
+                    prob = prob * 100
+                
+                # FILTRO ESTRICTO: Entre 60% y 65%
+                if 60.0 <= prob <= 65.0:
+                    apuestas_filtradas.append({
+                        "partido": f"{home} vs {away}",
+                        "home": home,
+                        "away": away,
+                        "liga": liga,
+                        "hora": hora_cdmx,
+                        "mercado": m["mercado"],
+                        "pick": m["pick"],
+                        "probabilidad": round(prob, 1)
+                    })
 
     except Exception as e:
-        print(f"Error al obtener datos: {e}")
+        print(f"Error extrayendo datos de BetMines: {e}")
 
-    return eventos_procesados
-
-# ------------------------------------------------------------------
-# MOTOR DE ESTRUCTURACIÓN Y SELECCIÓN DE VALUE BETS (+EV)
-# ------------------------------------------------------------------
-
-def procesar_analisis(eventos: List[Dict[str, Any]]):
-    analisis_detallado = []
-    candidatos_value = []
-
-    for ev in eventos:
-        home, away = ev["home"], ev["away"]
-        p1, pX, p2 = ev["prob_1x2"]["1"], ev["prob_1x2"]["X"], ev["prob_1x2"]["2"]
-
-        # 1. Análisis 1X2
-        cuota_1 = round(1 / p1, 2) if p1 > 0 else 2.0
-        forma = "FAVORABLE LOCAL" if p1 > 0.48 else ("EQUILIBRADO" if pX > 0.30 else "FAVORABLE VISITANTE")
-        a_1x2 = f"Prob. Implícita: Local {round(p1*100)}% (Cuota {cuota_1}) | Empate {round(pX*100)}% | Visitante {round(p2*100)}%. Estado de Forma: {forma} (xG FotMob: {ev['fotmob']['xg_home']} vs {ev['fotmob']['xg_away']})."
-
-        # 2. Mercado de Córners
-        tot_c = ev["soccerstats"]["corners_totales"]
-        a_corners = f"Volumen proyectado: **{tot_c} córners** ({ev['soccerstats']['corners_home']} local / {ev['soccerstats']['corners_away']} visitante). Generación por bandas vs despejes bajo presión."
-
-        # 3. Mercado de Tarjetas
-        tarj = ev["referee"]["prom_tarjetas"]
-        a_tarjetas = f"Tensión estimada: **{tarj} tarjetas**. Árbitro promedia {tarj} amarillas/rojas en partidos de este perfil."
-
-        # 4. Remates a puerta (2 Jugadores Opta)
-        j1, j2 = ev["opta_players"][0], ev["opta_players"][1]
-        a_remates = f"1. **{j1['nombre']}**: Promedio Opta de {j1['prom_tiros_puerta']} tiros a puerta/juego.\n2. **{j2['nombre']}**: Promedio Opta de {j2['prom_tiros_puerta']} tiros a puerta/juego."
-
-        analisis_detallado.append({
-            "partido": ev["partido"],
-            "liga": ev["liga"],
-            "hora": ev["hora"],
-            "a_1x2": a_1x2,
-            "a_corners": a_corners,
-            "a_tarjetas": a_tarjetas,
-            "a_remates": a_remates
-        })
-
-        # Generación de candidatos para Value Bets (Variedad de mercados)
-        if p1 >= 0.55:
-            candidatos_value.append({
-                "partido": ev["partido"],
-                "mercado": "Ganador 1X2",
-                "pick": f"Victoria {home}",
-                "score": p1,
-                "justificacion": f"Probabilidad implícita del {round(p1*100)}% respaldada por un xG a favor de {ev['fotmob']['xg_home']} en los últimos partidos."
-            })
-        if tot_c >= 9.0:
-            candidatos_value.append({
-                "partido": ev["partido"],
-                "mercado": "Córners Totales",
-                "pick": "Over 8.5 Córners",
-                "score": tot_c / 8.5,
-                "justificacion": f"SoccerStats registra un promedio combinado de **{tot_c} córners** por encuentro debido a alto volumen de centros por bandas."
-            })
-        if tarj >= 4.0:
-            candidatos_value.append({
-                "partido": ev["partido"],
-                "mercado": "Tarjetas Totales",
-                "pick": "Over 3.5 Tarjetas",
-                "score": tarj / 3.5,
-                "justificacion": f"El colegiado asignado registra un promedio riguroso de **{tarj} tarjetas** por partido en encuentros de alta tensión."
-            })
-        if j1["prom_tiros_puerta"] >= 1.2:
-            candidatos_value.append({
-                "partido": ev["partido"],
-                "mercado": "Jugadores - Remates",
-                "pick": f"{j1['nombre']} - Over 0.5 Tiros a Puerta",
-                "score": j1["prom_tiros_puerta"],
-                "justificacion": f"Dato Opta: El jugador promedia **{j1['prom_tiros_puerta']} disparos a puerta** por 90 minutos."
-            })
-
-    # Filtrar y asegurar variedad en el Top 10
-    candidatos_ordenados = sorted(candidatos_value, key=lambda x: x["score"], reverse=True)
-    
-    top_10 = []
-    mercados_usados = {}
-    
-    # Priorizar variedad de mercados en el Top 10
-    for cand in candidatos_ordenados:
-        m = cand["mercado"]
-        if mercados_usados.get(m, 0) < 3 and len(top_10) < 10:
-            top_10.append(cand)
-            mercados_usados[m] = mercados_usados.get(m, 0) + 1
-
-    # Rellenar si faltan para completar 10
-    if len(top_10) < 10:
-        for cand in candidatos_ordenados:
-            if cand not in top_10 and len(top_10) < 10:
-                top_10.append(cand)
-
-    return analisis_detallado, top_10
+    # Ordenar por probabilidad descendente dentro del rango
+    return sorted(apuestas_filtradas, key=lambda x: x["probabilidad"], reverse=True)
 
 # ------------------------------------------------------------------
-# VISTA WEB FASTAPI (OPTIMIZADA PARA EL ATAJO DE IPAD)
+# VISTA WEB OPTIMIZADA PARA TU ATAJO EN IPAD
 # ------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/analizar", response_class=HTMLResponse)
 def analizar(fecha: str = Query(None)):
-    fecha_proc = normalizar_fecha(fecha)
-    eventos = obtener_eventos_multifuente(fecha_proc)
+    fecha_proc = obtener_fecha_valida(fecha)
+    picks = consultar_y_filtrar_betmines(fecha_proc)
 
-    if not eventos:
+    if not picks:
         return f"""
-        <div style="font-family:sans-serif;background:#0f172a;color:#fff;padding:25px;text-align:center;border-radius:10px;">
-            <h3>⚠️ No hay partidos disponibles para la fecha {fecha_proc} (Hora CDMX).</h3>
-        </div>
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body {{ font-family: -apple-system, sans-serif; background: #121212; color: #fff; padding: 20px; text-align: center; }}
+                .box {{ background: #1e1e1e; border-radius: 12px; padding: 24px; border: 1px solid #333; margin-top: 30px; }}
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h3 style="color: #ffab00; margin-top: 0;">⚠️ Sin coincidencias en el rango 60% - 65%</h3>
+                <p style="color: #bbb; font-size: 10pt;">
+                    No se encontraron pronósticos de BetMines que caigan dentro del rango objetivo (60.0% a 65.0%) para la fecha <b>{fecha_proc}</b>.
+                </p>
+            </div>
+        </body>
+        </html>
         """
 
-    analisis_lista, top_10_bets = procesar_analisis(eventos)
-
-    # HTML Bloques de Análisis
-    html_eventos = ""
-    for item in analisis_lista:
-        html_eventos += f"""
-        <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px;margin-bottom:16px;">
-            <div style="color:#38bdf8;font-size:9pt;font-weight:bold;">{item['liga']} | 🕒 {item['hora']} (Hora CDMX)</div>
-            <div style="color:#fff;font-size:12pt;font-weight:bold;margin:4px 0 10px 0;">{item['partido']}</div>
+    # Generar tarjetas html de los partidos/mercados filtrados
+    cards_html = ""
+    for idx, item in enumerate(picks, 1):
+        cards_html += f"""
+        <div class="card">
+            <div class="card-header">
+                <span class="league">{item['liga']}</span>
+                <span class="time">🕒 {item['hora']} CDMX</span>
+            </div>
             
-            <div style="background:#0f172a;padding:8px;border-radius:6px;margin-bottom:6px;font-size:8.5pt;color:#cbd5e1;">
-                <b style="color:#facc15;">1. Análisis 1X2 (Probabilidad Implícita vs Forma FotMob):</b><br>{item['a_1x2']}
+            <div class="match-title">{item['partido']}</div>
+            
+            <div class="pick-box">
+                <div>
+                    <div class="market-label">{item['mercado']}</div>
+                    <div class="pick-name">{item['pick']}</div>
+                </div>
+                <div class="prob-badge">{item['probabilidad']}%</div>
             </div>
-            <div style="background:#0f172a;padding:8px;border-radius:6px;margin-bottom:6px;font-size:8.5pt;color:#cbd5e1;">
-                <b style="color:#38bdf8;">2. Mercado de Córners (SoccerStats):</b><br>{item['a_corners']}
-            </div>
-            <div style="background:#0f172a;padding:8px;border-radius:6px;margin-bottom:6px;font-size:8.5pt;color:#cbd5e1;">
-                <b style="color:#f43f5e;">3. Mercado de Tarjetas (Fricción & Árbitro):</b><br>{item['a_tarjetas']}
-            </div>
-            <div style="background:#0f172a;padding:8px;border-radius:6px;font-size:8.5pt;color:#cbd5e1;">
-                <b style="color:#4ade80;">4. Remates a Puerta (Top 2 Jugadores Opta):</b><br>{item['a_remates']}
-            </div>
-        </div>
-        """
-
-    # HTML Top 10 Value Bets
-    html_top10 = ""
-    for idx, val in enumerate(top_10_bets, 1):
-        html_top10 += f"""
-        <div style="background:#0f172a;border-left:4px solid #4ade80;padding:10px;margin-bottom:8px;border-radius:4px;">
-            <div style="color:#4ade80;font-weight:bold;font-size:9pt;">#{idx} VALUE BET: {val['partido']}</div>
-            <div style="color:#fff;font-size:9.5pt;font-weight:bold;">Mercado: {val['mercado']} → <span style="color:#facc15;">{val['pick']}</span></div>
-            <div style="color:#94a3b8;font-size:8.5pt;margin-top:4px;"><b>Dato Estadístico Clave:</b> {val['justificacion']}</div>
         </div>
         """
 
@@ -262,26 +176,94 @@ def analizar(fecha: str = Query(None)):
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Análisis Deportivo +EV - {fecha_proc}</title>
+        <title>BetMines 60%-65% Filter</title>
         <style>
-            body {{ font-family:-apple-system, sans-serif; background:#0f172a; color:#fff; padding:14px; margin:0; }}
-            .header {{ background:#1e293b; border:1px solid #334155; border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }}
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                background-color: #121212;
+                color: #ffffff;
+                margin: 0;
+                padding: 14px;
+            }}
+            .header-box {{
+                background: #1e1e1e;
+                border: 1px solid #2e7d32;
+                border-radius: 12px;
+                padding: 14px;
+                text-align: center;
+                margin-bottom: 16px;
+            }}
+            .title {{
+                color: #00e676;
+                font-size: 13pt;
+                font-weight: 800;
+                margin: 0;
+            }}
+            .subtitle {{
+                color: #b0bec5;
+                font-size: 8.5pt;
+                margin-top: 4px;
+            }}
+            .filter-info {{
+                background: #263238;
+                color: #ffab00;
+                font-size: 8pt;
+                font-weight: bold;
+                padding: 4px 10px;
+                border-radius: 20px;
+                display: inline-block;
+                margin-top: 8px;
+            }}
+            .card {{
+                background: #1e1e1e;
+                border-radius: 10px;
+                padding: 12px;
+                margin-bottom: 10px;
+                border: 1px solid #2c2c2c;
+            }}
+            .card-header {{
+                display: flex;
+                justify-content: space-between;
+                font-size: 8pt;
+                margin-bottom: 6px;
+            }}
+            .league {{ color: #40c4ff; font-weight: bold; }}
+            .time {{ color: #9e9e9e; }}
+            .match-title {{
+                font-size: 10.5pt;
+                font-weight: 700;
+                color: #fff;
+                margin-bottom: 8px;
+            }}
+            .pick-box {{
+                background: #181818;
+                border-left: 4px solid #00e676;
+                padding: 8px 12px;
+                border-radius: 6px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }}
+            .market-label {{ font-size: 7.5pt; color: #9e9e9e; text-transform: uppercase; }}
+            .pick-name {{ font-size: 9.5pt; color: #00e676; font-weight: bold; }}
+            .prob-badge {{
+                background: #00e676;
+                color: #000;
+                font-weight: 800;
+                font-size: 9.5pt;
+                padding: 4px 8px;
+                border-radius: 6px;
+            }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <h3 style="color:#38bdf8;margin:0;">📊 MOTOR ANALISTA DE DATOS DEPORTIVOS (+EV)</h3>
-            <p style="color:#cbd5e1;margin:4px 0 0 0;font-size:8.5pt;">Fecha: <b>{fecha_proc}</b> | Zona Horaria: <b>México (CDMX)</b></p>
-            <p style="color:#4ade80;font-size:8pt;margin:2px 0 0 0;">Fuentes: Sofascore • FotMob • SoccerStats • WhoScored/Opta</p>
+        <div class="header-box">
+            <div class="title">🎯 FILTRO BETMINES (+EV)</div>
+            <div class="subtitle">FECHA: <b>{fecha_proc}</b> | HORA MÉXICO (CDMX)</div>
+            <div class="filter-info">RANGO ACTIVO: 60.0% A 65.0% PROBABILIDAD</div>
         </div>
 
-        <h4 style="color:#facc15;margin:16px 0 8px 0;">📋 DESGLOSE DE EVENTOS Y MERCADOS AVANZADOS</h4>
-        {html_eventos}
-
-        <div style="background:#1e293b;border:1px solid #4ade80;border-radius:10px;padding:14px;margin-top:20px;">
-            <h3 style="color:#4ade80;margin:0 0 10px 0;">🏆 CONCLUSIÓN: TOP 10 VALUE BETS (SELECCIÓN DIVERSIFICADA)</h3>
-            {html_top10}
-        </div>
+        {cards_html}
     </body>
     </html>
     """
